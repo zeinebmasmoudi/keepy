@@ -1,0 +1,148 @@
+pipeline {
+    agent any
+    
+    parameters {
+        string(name: 'PROJECT_NAME', defaultValue: '', description: 'Name of the project')
+        string(name: 'USERNAME', defaultValue: '', description: 'DockerHub username')
+        string(name: 'BACKEND_NAME', defaultValue: 'spring-boot-server', description: 'Backend directory and image name')
+        string(name: 'FRONTEND_NAME', defaultValue: 'angular-16-client', description: 'Frontend directory and image name')
+    }
+    
+    environment {
+        TARGET_DIR = "${env.JENKINS_HOME}/workspace/AddDockerfiles/projects/${params.PROJECT_NAME}"
+        DOCKER_CREDENTIAL = credentials("${params.USERNAME}")
+        DOCKER_USERNAME = "${params.USERNAME}"
+    }
+    
+    stages {
+        stage('Validate Parameters') {
+            steps {
+                script {
+                    if (params.PROJECT_NAME == '') {
+                        error "PROJECT_NAME parameter is required"
+                    }
+                    if (params.USERNAME == '') {
+                        error "USERNAME parameter is required"
+                    }
+                    if (params.BACKEND_NAME == '') {
+                        error "BACKEND_NAME parameter is required"
+                    }
+                    if (params.FRONTEND_NAME == '') {
+                        error "FRONTEND_NAME parameter is required"
+                    }
+                    
+                    // Check if target directory exists
+                    if (!fileExists("${env.TARGET_DIR}")) {
+                        error "Project directory does not exist: ${env.TARGET_DIR}"
+                    }
+                    
+                    // Check if backend and frontend directories exist
+                    if (!fileExists("${env.TARGET_DIR}/${params.BACKEND_NAME}")) {
+                        error "Backend directory does not exist: ${env.TARGET_DIR}/${params.BACKEND_NAME}"
+                    }
+                    if (!fileExists("${env.TARGET_DIR}/${params.FRONTEND_NAME}")) {
+                        error "Frontend directory does not exist: ${env.TARGET_DIR}/${params.FRONTEND_NAME}"
+                    }
+                    
+                    echo "Building project: ${params.PROJECT_NAME}"
+                    echo "Using DockerHub username: ${params.USERNAME}"
+                    echo "Backend name: ${params.BACKEND_NAME}"
+                    echo "Frontend name: ${params.FRONTEND_NAME}"
+                }
+            }
+        }
+        
+        stage('Update Configuration Files') {
+            steps {
+                script {
+                    // Update docker-compose.yml
+                    dir("${env.TARGET_DIR}") {
+                        if (fileExists("docker-compose.yml")) {
+                            echo "Updating docker-compose.yml with DockerHub credentials and image names"
+                            
+                            // Read the file, update it, and write it back
+                            def dockerComposeContent = readFile("docker-compose.yml")
+                            
+                            // Update the Docker username variable
+                            dockerComposeContent = dockerComposeContent.replaceAll('\\$\\{DOCKER_USERNAME\\}', "${params.USERNAME}")
+                            
+                            // Write the updated content back to the file
+                            writeFile file: "docker-compose.yml", text: dockerComposeContent
+                            
+                            echo "docker-compose.yml updated successfully"
+                        } else {
+                            error "docker-compose.yml not found in project directory"
+                        }
+                        
+                        // Update Jenkinsfile
+                        if (fileExists("Jenkinsfile")) {
+                            echo "Updating Jenkinsfile with DockerHub credentials and image names"
+                            
+                            // Read the file, update it, and write it back
+                            def jenkinsfileContent = readFile("Jenkinsfile")
+                            
+                            // Replace environment variables
+                            jenkinsfileContent = jenkinsfileContent.replaceAll('// DOCKER_USERNAME', "DOCKER_USERNAME = \"${params.USERNAME}\"")
+                            jenkinsfileContent = jenkinsfileContent.replaceAll('// DOCKER_CREDENTIALS', "DOCKER_CREDENTIALS = credentials(\"${params.USERNAME}\")")
+                      
+                            // Replace TARGET_DIR with the actual path
+                            jenkinsfileContent = jenkinsfileContent.replaceAll('// TARGET_DIR', "TARGET_DIR = \"${env.TARGET_DIR}\"")
+                            
+                            // Write the updated content back to the file
+                            writeFile file: "Jenkinsfile", text: jenkinsfileContent
+                            
+                            echo "Jenkinsfile updated successfully"
+                        } else {
+                            echo "WARNING: Jenkinsfile not found in project directory"
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Create and Trigger Build Job') {
+            steps {
+                script {
+                    echo "Creating and triggering build job for project: ${params.PROJECT_NAME}"
+                    
+                    // Read the modified Jenkinsfile content
+                    def jenkinsfileContent = readFile("${env.TARGET_DIR}/Jenkinsfile")
+                    
+                    // Create the job with the inline Jenkinsfile content
+                    jobDsl scriptText: """
+                        pipelineJob('${params.PROJECT_NAME}-build') {
+                            description('Automated build job for ${params.PROJECT_NAME}')
+                            
+                            parameters {
+                                stringParam('DOCKER_USERNAME', '${params.USERNAME}', 'Docker Hub username')
+                            }
+                            
+                            definition {
+                                cps {
+                                    script('''${jenkinsfileContent}''')
+                                    sandbox(true)
+                                }
+                            }
+                        }
+                    """
+                    
+                    // Trigger the newly created job
+                    build job: "${params.PROJECT_NAME}-build", 
+                          parameters: [
+                              string(name: 'DOCKER_USERNAME', value: params.USERNAME)
+                          ],
+                          wait: false
+                }
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo "Pipeline completed successfully. Project ${params.PROJECT_NAME} configurations updated."
+        }
+        failure {
+            echo "Pipeline failed. Please check the logs for details."
+        }
+    }
+}
